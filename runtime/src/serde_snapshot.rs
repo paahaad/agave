@@ -46,7 +46,7 @@ use {
     solana_stake_interface::state::Delegation,
     std::{
         collections::{HashMap, HashSet},
-        io::{self, BufReader, Read, Write},
+        io::{self, Read, Write},
         path::PathBuf,
         result::Result,
         sync::{
@@ -311,11 +311,11 @@ impl From<BankFieldsToSerialize> for SerializableVersionedBank {
 #[cfg(feature = "frozen-abi")]
 impl solana_frozen_abi::abi_example::TransparentAsHelper for SerializableVersionedBank {}
 
-/// Helper type to wrap BufReader streams when deserializing and reconstructing from either just a
-/// full snapshot, or both a full and incremental snapshot
-pub struct SnapshotStreams<'a, R> {
-    pub full_snapshot_stream: &'a mut BufReader<R>,
-    pub incremental_snapshot_stream: Option<&'a mut BufReader<R>>,
+/// Helper type to wrap snapshot streams when deserializing and reconstructing from either just a
+/// full snapshot, or both a full and incremental snapshot.
+pub struct SnapshotStreams<'a, R: ?Sized> {
+    pub full_snapshot_stream: &'a mut R,
+    pub incremental_snapshot_stream: Option<&'a mut R>,
 }
 
 /// Helper type to wrap BankFields when reconstructing Bank from either just a full
@@ -402,10 +402,10 @@ where
 }
 
 fn deserialize_accounts_db_fields<R>(
-    stream: &mut BufReader<R>,
+    stream: &mut R,
 ) -> Result<AccountsDbFields<SerializableAccountStorageEntry>, Error>
 where
-    R: Read,
+    R: Read + ?Sized,
 {
     deserialize_from::<_, _>(stream)
 }
@@ -459,7 +459,7 @@ pub struct ExtraFieldsToSerialize {
 }
 
 fn deserialize_bank_fields<R>(
-    mut stream: &mut BufReader<R>,
+    mut stream: &mut R,
 ) -> Result<
     (
         BankFieldsToDeserialize,
@@ -468,7 +468,7 @@ fn deserialize_bank_fields<R>(
     Error,
 >
 where
-    R: Read,
+    R: Read + ?Sized,
 {
     let deserializable_bank = deserialize_from::<_, DeserializableVersionedBank>(&mut stream)?;
     if !deserializable_bank.unused_epoch_stakes.is_empty() {
@@ -501,8 +501,8 @@ where
     Ok((bank_fields, accounts_db_fields))
 }
 
-pub(crate) fn fields_from_stream<R: Read>(
-    snapshot_stream: &mut BufReader<R>,
+pub(crate) fn fields_from_stream<R: Read + ?Sized>(
+    snapshot_stream: &mut R,
 ) -> std::result::Result<
     (
         BankFieldsToDeserialize,
@@ -514,8 +514,8 @@ pub(crate) fn fields_from_stream<R: Read>(
 }
 
 #[cfg(feature = "dev-context-only-utils")]
-pub(crate) fn fields_from_streams(
-    snapshot_streams: &mut SnapshotStreams<impl Read>,
+pub(crate) fn fields_from_streams<R: Read + ?Sized>(
+    snapshot_streams: &mut SnapshotStreams<R>,
 ) -> std::result::Result<
     (
         SnapshotBankFields,

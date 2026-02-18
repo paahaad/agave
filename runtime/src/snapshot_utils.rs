@@ -13,7 +13,10 @@ use {
             get_slot_and_append_vec_id, SnapshotStorageRebuilder,
         },
     },
-    agave_fs::{buffered_writer::large_file_buf_writer, io_setup::IoSetupState, FileInfo},
+    agave_fs::{
+        buffered_reader::large_file_buf_reader, buffered_writer::large_file_buf_writer,
+        io_setup::IoSetupState, FileInfo,
+    },
     agave_snapshots::{
         archive_snapshot,
         error::{
@@ -47,7 +50,7 @@ use {
         cmp::Ordering,
         collections::{HashMap, HashSet},
         fs,
-        io::{self, BufReader, Error as IoError, Read, Seek, Write},
+        io::{self, BufRead, Error as IoError, Read, Seek, Write},
         mem,
         num::NonZeroUsize,
         path::{Path, PathBuf},
@@ -67,6 +70,7 @@ pub mod snapshot_storage_rebuilder;
 pub const MAX_OBSOLETE_ACCOUNTS_FILE_SIZE: u64 = 1024 * 1024 * 1024 * 12; // 12 GB
 pub const MAX_SNAPSHOT_DATA_FILE_SIZE: u64 = 32 * 1024 * 1024 * 1024; // 32 GiB
 const MAX_SNAPSHOT_VERSION_FILE_SIZE: u64 = 8; // byte
+const SNAPSHOT_READ_BUFFER_SIZE: usize = 4 * 1024 * 1024; // 4 MiB
 
 // Snapshot Fastboot Version History
 // Legacy - No fastboot version file, storages flushed file presence determines if snapshot is loadable
@@ -727,7 +731,6 @@ fn deserialize_obsolete_accounts(
     let obsolete_accounts_path = bank_snapshot_dir
         .as_ref()
         .join(snapshot_paths::SNAPSHOT_OBSOLETE_ACCOUNTS_FILENAME);
-    let obsolete_accounts_file = fs::File::open(&obsolete_accounts_path)?;
     // If the file is too large return error
     let obsolete_accounts_file_metadata = fs::metadata(&obsolete_accounts_path)?;
     if obsolete_accounts_file_metadata.len() > maximum_obsolete_accounts_file_size {
@@ -740,7 +743,8 @@ fn deserialize_obsolete_accounts(
         return Err(IoError::other(error_message).into());
     }
 
-    let mut data_file_stream = BufReader::new(obsolete_accounts_file);
+    let io_setup = IoSetupState::default();
+    let mut data_file_stream = large_snapshot_file_reader(&obsolete_accounts_path, &io_setup)?;
 
     let obsolete_accounts = serde_snapshot::deserialize_from(&mut data_file_stream)?;
 
@@ -760,9 +764,9 @@ where
 
 pub fn deserialize_snapshot_data_file<T: Sized>(
     data_file_path: &Path,
-    deserializer: impl FnOnce(&mut BufReader<std::fs::File>) -> Result<T>,
+    deserializer: impl FnOnce(&mut dyn BufRead) -> Result<T>,
 ) -> Result<T> {
-    let wrapped_deserializer = move |streams: &mut SnapshotStreams<std::fs::File>| -> Result<T> {
+    let wrapped_deserializer = move |streams: &mut SnapshotStreams<dyn BufRead>| -> Result<T> {
         deserializer(streams.full_snapshot_stream)
     };
 
@@ -780,7 +784,7 @@ pub fn deserialize_snapshot_data_file<T: Sized>(
 
 pub fn deserialize_snapshot_data_files<T: Sized>(
     snapshot_root_paths: &SnapshotRootPaths,
-    deserializer: impl FnOnce(&mut SnapshotStreams<std::fs::File>) -> Result<T>,
+    deserializer: impl FnOnce(&mut SnapshotStreams<dyn BufRead>) -> Result<T>,
 ) -> Result<T> {
     deserialize_snapshot_data_files_capped(
         snapshot_root_paths,
@@ -815,12 +819,14 @@ where
 fn deserialize_snapshot_data_files_capped<T: Sized>(
     snapshot_root_paths: &SnapshotRootPaths,
     maximum_file_size: u64,
-    deserializer: impl FnOnce(&mut SnapshotStreams<std::fs::File>) -> Result<T>,
+    deserializer: impl FnOnce(&mut SnapshotStreams<dyn BufRead>) -> Result<T>,
 ) -> Result<T> {
+    let io_setup = IoSetupState::default();
     let (full_snapshot_file_size, mut full_snapshot_data_file_stream) =
         create_snapshot_data_file_stream(
             &snapshot_root_paths.full_snapshot_root_file_path,
             maximum_file_size,
+            &io_setup,
         )?;
 
     let (incremental_snapshot_file_size, mut incremental_snapshot_data_file_stream) =
@@ -830,6 +836,7 @@ fn deserialize_snapshot_data_files_capped<T: Sized>(
             Some(create_snapshot_data_file_stream(
                 incremental_snapshot_root_file_path,
                 maximum_file_size,
+                &io_setup,
             )?)
         } else {
             None
@@ -837,8 +844,10 @@ fn deserialize_snapshot_data_files_capped<T: Sized>(
         .unzip();
 
     let mut snapshot_streams = SnapshotStreams {
-        full_snapshot_stream: &mut full_snapshot_data_file_stream,
-        incremental_snapshot_stream: incremental_snapshot_data_file_stream.as_mut(),
+        full_snapshot_stream: &mut *full_snapshot_data_file_stream,
+        incremental_snapshot_stream: incremental_snapshot_data_file_stream
+            .as_mut()
+            .map(|stream| &mut **stream),
     };
     let ret = deserializer(&mut snapshot_streams)?;
 
@@ -866,21 +875,23 @@ fn deserialize_snapshot_data_files_capped<T: Sized>(
 fn create_snapshot_data_file_stream(
     snapshot_root_file_path: impl AsRef<Path>,
     maximum_file_size: u64,
-) -> Result<(u64, BufReader<std::fs::File>)> {
-    let snapshot_file_size = fs::metadata(&snapshot_root_file_path)?.len();
+    io_setup: &IoSetupState,
+) -> Result<(u64, Box<dyn BufRead>)> {
+    let snapshot_root_file_path = snapshot_root_file_path.as_ref();
+    let snapshot_file_size = fs::metadata(snapshot_root_file_path)?.len();
 
     if snapshot_file_size > maximum_file_size {
         let error_message = format!(
             "too large snapshot data file to deserialize: '{}' has {} bytes (max size is {} bytes)",
-            snapshot_root_file_path.as_ref().display(),
+            snapshot_root_file_path.display(),
             snapshot_file_size,
             maximum_file_size,
         );
         return Err(IoError::other(error_message).into());
     }
 
-    let snapshot_data_file = fs::File::open(snapshot_root_file_path)?;
-    let snapshot_data_file_stream = BufReader::new(snapshot_data_file);
+    let snapshot_data_file_stream =
+        large_snapshot_file_reader(snapshot_root_file_path, io_setup)?;
 
     Ok((snapshot_file_size, snapshot_data_file_stream))
 }
@@ -890,22 +901,30 @@ fn create_snapshot_data_file_stream(
 fn check_deserialize_file_consumed(
     file_size: u64,
     file_path: impl AsRef<Path>,
-    file_stream: &mut BufReader<std::fs::File>,
+    file_stream: &mut dyn BufRead,
 ) -> Result<()> {
-    let consumed_size = file_stream.stream_position()?;
-
-    if consumed_size != file_size {
+    if !file_stream.fill_buf()?.is_empty() {
         let error_message = format!(
-            "invalid snapshot data file: '{}' has {} bytes, however consumed {} bytes to \
-             deserialize",
+            "invalid snapshot data file: '{}' has {} bytes, however it was not fully consumed \
+             while deserializing",
             file_path.as_ref().display(),
             file_size,
-            consumed_size,
         );
         return Err(IoError::other(error_message).into());
     }
 
     Ok(())
+}
+
+fn large_snapshot_file_reader(
+    path: &Path,
+    io_setup: &IoSetupState,
+) -> Result<Box<dyn BufRead>> {
+    Ok(Box::new(large_file_buf_reader(
+        path,
+        SNAPSHOT_READ_BUFFER_SIZE,
+        io_setup,
+    )?))
 }
 
 /// Return account path from the appendvec path after checking its format.
@@ -1201,7 +1220,8 @@ fn snapshot_fields_from_files(file_receiver: &Receiver<FileInfo>) -> Result<Snap
         ))
     })?;
 
-    let mut snapshot_stream = BufReader::new(snapshot_bank.file);
+    let io_setup = IoSetupState::default();
+    let mut snapshot_stream = large_snapshot_file_reader(&snapshot_bank.path, &io_setup)?;
     let (bank_fields, accounts_db_fields) = match snapshot_version {
         SnapshotVersion::V1_2_0 => serde_snapshot::fields_from_stream(&mut snapshot_stream)?,
     };
