@@ -21,6 +21,7 @@ use {
         repair::{
             block_id_repair_service::BlockIdRepairChannels,
             repair_service::{OutstandingShredRepairs, RepairInfo, RepairServiceChannels},
+            xdp_sender::RepairXdpSender,
         },
         replay_stage::{ReplayReceivers, ReplaySenders, ReplayStage, ReplayStageConfig},
         shred_fetch_stage::{SHRED_FETCH_CHANNEL_SIZE, ShredFetchStage},
@@ -145,6 +146,7 @@ pub struct TvuConfig {
     pub shred_sigverify_threads: NonZeroUsize,
     pub bls_sigverify_threads: NonZeroUsize,
     pub turbine_xdp_sender: Option<XdpSender>,
+    pub repair_xdp_sender: Option<RepairXdpSender>,
 }
 
 impl Default for TvuConfig {
@@ -160,6 +162,7 @@ impl Default for TvuConfig {
             shred_sigverify_threads: NonZeroUsize::new(1).expect("1 is non-zero"),
             bls_sigverify_threads: NonZeroUsize::new(1).expect("1 is non-zero"),
             turbine_xdp_sender: None,
+            repair_xdp_sender: None,
         }
     }
 }
@@ -476,6 +479,7 @@ impl Tvu {
                 leader_schedule_cache.clone(),
                 tvu_config.shred_version,
                 outstanding_repair_requests,
+                tvu_config.repair_xdp_sender,
             )
         };
 

@@ -10,6 +10,7 @@ use {
             repair_service::{
                 OutstandingShredRepairs, RepairInfo, RepairService, RepairServiceChannels,
             },
+            xdp_sender::RepairXdpSender,
         },
         result::{Error, Result},
     },
@@ -276,6 +277,7 @@ impl WindowService {
         leader_schedule_cache: Arc<LeaderScheduleCache>,
         shred_version: u16,
         outstanding_repair_requests: Arc<RwLock<OutstandingShredRepairs>>,
+        repair_xdp_sender: Option<RepairXdpSender>,
     ) -> WindowService {
         let cluster_info = repair_info.cluster_info.clone();
         let bank_forks = repair_info.bank_forks.clone();
@@ -297,6 +299,7 @@ impl WindowService {
             repair_info.clone(),
             outstanding_repair_requests.clone(),
             repair_service_channels,
+            repair_xdp_sender,
         );
 
         let block_id_repair_service = BlockIdRepairService::new(

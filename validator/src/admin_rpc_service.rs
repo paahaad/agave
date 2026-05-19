@@ -645,6 +645,7 @@ impl AdminRpc for AdminRpcImpl {
                 slot,
                 shred_index,
                 &post_init.repair_socket,
+                None,
                 post_init.outstanding_repair_requests.clone(),
             );
             Ok(())

@@ -375,7 +375,13 @@ pub fn execute(
                 std::net::SocketAddrV4,
             };
 
-            let src_port = node.sockets.retransmit_sockets[0]
+            let turbine_src_port = node.sockets.retransmit_sockets[0]
+                .local_addr()
+                .expect("failed to get local address")
+                .port();
+            let repair_src_port = node
+                .sockets
+                .repair
                 .local_addr()
                 .expect("failed to get local address")
                 .port();
@@ -397,7 +403,8 @@ pub fn execute(
             (
                 TransmitterBuilder::new(xdp_config, exit.clone())
                     .expect("failed to create xdp transmitter"),
-                SocketAddrV4::new(src_ip, src_port),
+                SocketAddrV4::new(src_ip, turbine_src_port),
+                SocketAddrV4::new(src_ip, repair_src_port),
             )
         });
 
