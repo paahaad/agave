@@ -16,3 +16,4 @@ pub mod result;
 pub mod serve_repair;
 pub mod serve_repair_service;
 pub(crate) mod standard_repair_handler;
+pub(crate) mod xdp_sender;

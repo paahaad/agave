@@ -375,7 +375,18 @@ pub fn execute(
                 std::net::SocketAddrV4,
             };
 
-            let src_port = node.sockets.retransmit_sockets[0]
+            let turbine_src_port = node.sockets.retransmit_sockets[0]
+                .local_addr()
+                .expect("failed to get local address")
+                .port();
+            // Source UDP port for repair-response XDP egress. MUST equal the
+            // kernel-bound repair socket port: peer validators expect repair
+            // replies on the (B_ip, B_repair_port) src tuple matching the
+            // socket they originally addressed, otherwise their kernel
+            // demux drops the datagram before it reaches their repair_socket.
+            let repair_src_port = node
+                .sockets
+                .repair
                 .local_addr()
                 .expect("failed to get local address")
                 .port();
@@ -397,7 +408,8 @@ pub fn execute(
             (
                 TransmitterBuilder::new(xdp_config, exit.clone())
                     .expect("failed to create xdp transmitter"),
-                SocketAddrV4::new(src_ip, src_port),
+                SocketAddrV4::new(src_ip, turbine_src_port),
+                SocketAddrV4::new(src_ip, repair_src_port),
             )
         });
 

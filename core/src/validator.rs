@@ -18,6 +18,7 @@ use {
         forwarding_stage::ForwardingClientConfig,
         repair::{
             self, repair_handler::RepairHandlerType, serve_repair_service::ServeRepairService,
+            xdp_sender::RepairXdpSender,
         },
         resource_limits::{ResourceLimitError, adjust_nofile_limit},
         sample_performance_service::SamplePerformanceService,
@@ -687,7 +688,7 @@ impl Validator {
         socket_addr_space: SocketAddrSpace,
         tpu_config: ValidatorTpuConfig,
         admin_rpc_service_post_init: Arc<RwLock<Option<AdminRpcRequestMetadataPostInit>>>,
-        xdp_builder_with_src_addr: Option<(TransmitterBuilder, SocketAddrV4)>,
+        xdp_builder_with_src_addr: Option<(TransmitterBuilder, SocketAddrV4, SocketAddrV4)>,
     ) -> Result<Self> {
         let exit = Arc::new(AtomicBool::new(false));
         Self::new_with_exit(
@@ -722,7 +723,7 @@ impl Validator {
         socket_addr_space: SocketAddrSpace,
         tpu_config: ValidatorTpuConfig,
         admin_rpc_service_post_init: Arc<RwLock<Option<AdminRpcRequestMetadataPostInit>>>,
-        xdp_builder_with_src_addr: Option<(TransmitterBuilder, SocketAddrV4)>,
+        xdp_builder_with_src_addr: Option<(TransmitterBuilder, SocketAddrV4, SocketAddrV4)>,
         exit: Arc<AtomicBool>,
     ) -> Result<Self> {
         #[cfg(debug_assertions)]
@@ -1536,11 +1537,32 @@ impl Validator {
             .as_ref()
             .map(|service| service.sender_cloned());
 
+        // Build the XDP transmitter (if configured) BEFORE constructing the
+        // `ServeRepairService` so its egress responder can be wired directly
+        // to the shared `agave_xdp` TX channels using a fixed src port equal
+        // to the kernel-bound repair socket's port. The same single transmitter
+        // backs turbine (retransmit), QUIC, and now repair-response egress.
+        let (xdp_transmitter, turbine_xdp_sender, quic_xdp_sender, repair_xdp_sender) =
+            if let Some((xdp_transmit_builder, turbine_src_addr, repair_src_addr)) =
+                xdp_builder_with_src_addr
+            {
+                let (transmitter, sender) = xdp_transmit_builder.build();
+                (
+                    Some(transmitter),
+                    Some(XdpSender::new(sender.clone(), turbine_src_addr)),
+                    Some((sender.clone(), *turbine_src_addr.ip())),
+                    Some(RepairXdpSender::new(sender, repair_src_addr)),
+                )
+            } else {
+                (None, None, None, None)
+            };
+
         let serve_repair_service = ServeRepairService::new(
             serve_repair,
             node.sockets.serve_repair,
             socket_addr_space,
             stats_reporter_sender,
+            repair_xdp_sender,
             exit.clone(),
         );
 
@@ -1571,18 +1593,6 @@ impl Validator {
         });
         // This channel backing up indicates a serious problem in votor
         let (votor_event_sender, votor_event_receiver) = bounded(1000);
-
-        let (xdp_transmitter, turbine_xdp_sender, quic_xdp_sender) =
-            if let Some((xdp_transmit_builder, src_addr)) = xdp_builder_with_src_addr {
-                let (transmitter, sender) = xdp_transmit_builder.build();
-                (
-                    Some(transmitter),
-                    Some(XdpSender::new(sender.clone(), src_addr)),
-                    Some((sender, *src_addr.ip())),
-                )
-            } else {
-                (None, None, None)
-            };
 
         // disable all2all tests if not allowed for a given cluster type
         let alpenglow_socket = if genesis_config.cluster_type == ClusterType::Testnet
